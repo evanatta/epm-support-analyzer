@@ -12,13 +12,15 @@ type ReportFile = {
   samples: { line: number; text: string }[]
 }
 
-type Category = { category: string; severity: string; total: number; files: ReportFile[] }
+type Category = { category: string; severity: string; impact?: string; description?: string; total: number; files: ReportFile[] }
+type Impact = { impact: string; severity: string; total: number; categories: string[] }
 type Report = {
   source: string
   platform: string
   files_scanned: string[]
   files_skipped: { path: string; reason: string }[]
   notes: string[]
+  impacts?: Impact[]
   categories: Category[]
 }
 
@@ -34,9 +36,9 @@ function download(report: Report, format: 'json' | 'csv') {
       const text = String(value)
       return '"' + (/^[\s=+@\-\u0000-\u001f]/.test(text) ? "'" + text : text).replaceAll('"', '""') + '"'
     }
-    const rows: (string | number)[][] = [['category', 'severity', 'path', 'line', 'text']]
+    const rows: (string | number)[][] = [['category', 'severity', 'path', 'line', 'text', 'impact']]
     report.categories.forEach(category => category.files.forEach(file => file.samples.forEach(sample => {
-      rows.push([category.category, category.severity, file.path, sample.line, sample.text])
+      rows.push([category.category, category.severity, file.path, sample.line, sample.text, category.impact || ''])
     })))
     content = rows.map(row => row.map(cell).join(',')).join('\r\n') + '\r\n'
   }
@@ -54,10 +56,12 @@ function CategoryDetails({ category }: { category: Category }) {
     <details className="category">
       <summary className="category-summary">
         <span className="min-w-0 flex-1 font-semibold">{category.category}</span>
+        {category.impact && <span className="tag">{category.impact}</span>}
         <span className={`severity severity-${category.severity}`}>{category.severity || 'unspecified'}</span>
         <span className="min-w-12 text-right font-mono font-semibold">{category.total.toLocaleString()}</span>
       </summary>
       <div className="space-y-4 border-t border-slate-200 bg-slate-50 p-4 sm:p-6">
+        {category.description && <p className="text-sm leading-relaxed text-slate-600">{category.description}</p>}
         {category.files.map(file => (
           <article className="rounded-lg border border-slate-200 bg-white p-4" key={file.path}>
             <div className="flex flex-wrap items-start justify-between gap-2">
@@ -93,6 +97,18 @@ function Results({ report }: { report: Report }) {
           <div className="metric" key={label}><p className="text-xs font-medium uppercase tracking-wider text-slate-500">{label}</p><p className="mt-2 text-2xl font-semibold capitalize">{value}</p></div>
         ))}
       </div>
+      {!!report.impacts?.length && <div className="panel mt-5">
+        <h3 className="font-semibold">Impact areas</h3>
+        <p className="mt-1 text-sm text-slate-500">Findings grouped by the part of the endpoint they affect, highest severity first.</p>
+        <ul aria-label="Impact areas" className="mt-4 grid gap-3 sm:grid-cols-2">
+          {report.impacts.map(impact => (
+            <li className="impact" key={impact.impact}>
+              <div className="flex items-center gap-3"><span className="min-w-0 flex-1 font-semibold">{impact.impact}</span><span className={`severity severity-${impact.severity}`}>{impact.severity || 'unspecified'}</span><span className="font-mono font-semibold">{impact.total.toLocaleString()}</span></div>
+              <p className="mt-2 text-sm text-slate-500">{impact.categories.join(' · ')}</p>
+            </li>
+          ))}
+        </ul>
+      </div>}
       <div className="panel mt-5 !p-0 overflow-hidden">
         <div className="flex gap-1 overflow-x-auto border-b border-slate-200 px-4" role="group" aria-label="Report sections">
           {([['categories', `Categories (${report.categories.length})`], ['files', 'Files'], ['notes', `Notes (${report.notes.length})`]] as const).map(([value, label]) => (
@@ -160,7 +176,7 @@ export function SupportInfo() {
       <Link to="/" className="mb-7 inline-flex text-sm font-medium text-slate-500 hover:text-teal-800">← All tools</Link>
       <div className="page-heading">
         <p className="eyebrow">SUPPORT PACKAGE ANALYSIS</p><h1>Support Info</h1>
-        <p className="lead">Find recurring errors. Trace every match back to its source.</p>
+        <p className="lead">Find recurring errors and conditions that affect the endpoint. Trace every match back to its source.</p>
       </div>
       <form onSubmit={analyze} className="panel" aria-busy={busy}>
         <div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div><h2>Load a support package</h2><p className="mt-1 text-sm text-slate-500">Use a decrypted archive from Windows, macOS, or Linux.</p></div><span className="tag">UP TO 200 MB</span></div>

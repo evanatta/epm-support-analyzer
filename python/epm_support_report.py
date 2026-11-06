@@ -1,5 +1,6 @@
 import argparse
 import csv
+import gzip
 import io
 import json
 import os
@@ -15,10 +16,12 @@ from collections import defaultdict
 from typing import Dict, Iterator, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rules import PROCMON_RESULTS, compiled
+from rules import BENIGN, IMPACTS, PROCMON_RESULTS, SNAPSHOT_FILES, compiled, for_file, impact_label
 
-TEXT_EXT = {".log", ".txt", ".out", ".err", ".csv", ".xml", ".json", ".conf", ".cfg", ".ini", ""}
-TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})|(\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}:\d{2}(?: ?[AP]M)?)|([A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2})")
+TEXT_EXT = {".log", ".txt", ".out", ".err", ".csv", ".xml", ".json", ".conf", ".cfg", ".ini", ".trace", ""}
+ROTATED_RE = re.compile(r"\.log\.\d+$|\.log-\d+(-\d+)?$|\.trace\.\d+$|\.\d+$")
+SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
+TS_RE = re.compile(r"(\d{4}[-./]\d{2}[-./]\d{2}[ T]\d{2}:\d{2}:\d{2})|(\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}:\d{2}(?: ?[AP]M)?)|([A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2})")
 MAX_TEXT_LIST = 20
 
 
@@ -104,9 +107,11 @@ def iter_lines(raw, enc: str) -> Iterator[Tuple[int, str]]:
 def detect_platform(names: List[str]) -> str:
     low = " ".join(names).lower()
     score = {
-        "windows": sum(low.count(k) for k in (".evtx", ".pml", "programdata", "windows", "vfagent", "registry", ".reg")),
-        "macos": sum(low.count(k) for k in (".logarchive", "library/", "system.log", "install.log", ".plist", "macos", "darwin")),
-        "linux": sum(low.count(k) for k in ("var/log", "syslog", "journal", "messages", "/etc/", "linux", "dmesg")),
+        "windows": sum(low.count(k) for k in (".evtx", ".pml", "programdata", "windows", "vfagent", "vf_agent", "registry", ".reg")),
+        "macos": sum(low.count(k) for k in (".logarchive", "library/", "system.log", "install.log", ".plist", "macos", "darwin",
+                                            "epm_status.txt", "systemextensionsctl")),
+        "linux": sum(low.count(k) for k in ("var/log", "syslog", "journal", "messages", "/etc/", "linux", "dmesg",
+                                            "initialinfo", "epmsudo", "epmpreloader", "pam.d/")),
     }
     best = max(score, key=score.get)
     return best if score[best] else "unknown"
@@ -118,13 +123,15 @@ class Report:
         self.platform = platform
         self.hits: Dict[str, Dict[str, List[Tuple[int, Optional[str], str]]]] = defaultdict(lambda: defaultdict(list))
         self.severity: Dict[str, str] = {}
+        self.meta: Dict[str, Tuple[str, str]] = {}
         self.scanned: List[str] = []
         self.skipped: List[Tuple[str, str]] = []
         self.notes: List[str] = []
 
-    def add(self, cat, sev, path, line, text):
+    def add(self, cat, sev, path, line, text, impact="general", description=""):
         m = TS_RE.search(text)
         self.severity[cat] = sev
+        self.meta.setdefault(cat, (impact, description))
         self.hits[cat][path].append((line, m.group(0) if m else None, text.strip()[:300]))
 
 
@@ -143,10 +150,14 @@ def scan_text(rep: Report, pkg: Package, name: str, rules, label: Optional[str] 
         fh.close()
         return
     rep.scanned.append(label)
+    rules = for_file(rules, label)
     for n, line in iter_lines(fh, enc):
+        low = line.lower()
+        if BENIGN.search(low):
+            continue
         for r in rules:
-            if r["regex"].search(line):
-                rep.add(r["name"], r["severity"], label, n, line)
+            if r["regex"].search(low):
+                rep.add(r["name"], r["severity"], label, n, line, r["impact"], r.get("description", ""))
                 break
 
 
@@ -171,6 +182,7 @@ def scan_procmon_csv(rep: Report, pkg: Package, name: str):
             p = row[idx["Path"]] if "Path" in idx else ""
             ts = row[idx["Time of Day"]] if "Time of Day" in idx else None
             rep.severity["Procmon: " + res] = "medium"
+            rep.meta.setdefault("Procmon: " + res, ("host", "Procmon captured failed file or registry operations."))
             rep.hits["Procmon: " + res][name].append((line, ts, f"{proc} {p}"[:300]))
 
 
@@ -187,12 +199,14 @@ def scan_evtx(rep: Report, pkg: Package, name: str, rules):
         with evtx.Evtx(t.name) as log:
             for i, rec in enumerate(log.records(), 1):
                 xml = rec.xml()
+                low = xml.lower()
                 lvl = re.search(r"<Level>(\d)</Level>", xml)
                 if lvl and lvl.group(1) in ("1", "2"):
-                    rep.add("Event Viewer: Critical/Error", "high", name + " (record #)", i, xml[:300])
+                    rep.add("Event Viewer: Critical/Error", "high", name + " (record #)", i, xml[:300], "host",
+                            "Windows event log entries at Critical or Error level.")
                 for r in rules[:-1]:
-                    if r["regex"].search(xml):
-                        rep.add(r["name"], r["severity"], name + " (record #)", i, xml[:300])
+                    if r["files"] is None and r["regex"].search(low):
+                        rep.add(r["name"], r["severity"], name + " (record #)", i, xml[:300], r["impact"], r.get("description", ""))
                         break
     finally:
         os.unlink(t.name)
@@ -261,6 +275,8 @@ def scan_package(pkg: Package, platform: str, rep: Report, prefix: str = "", dep
                 if zipfile.is_zipfile(t.name) or tarfile.is_tarfile(t.name):
                     with closing(Package(t.name)) as nested:
                         scan_package(nested, platform, rep, label + "/", depth + 1)
+                elif data[:2] == b"\x1f\x8b":
+                    scan_gzip(rep, data, label, rules)
                 else:
                     rep.skipped.append((label, "unreadable archive"))
             finally:
@@ -274,10 +290,21 @@ def scan_package(pkg: Package, platform: str, rep: Report, prefix: str = "", dep
         elif ext == ".csv" and is_procmon_csv(pkg, name):
             scan_procmon_csv(rep, pkg, name)
             _relabel(rep, name, label)
-        elif ext in TEXT_EXT or re.search(r"\.log\.\d+$|\.\d+$", low):
+        elif SNAPSHOT_FILES.search(name):
+            rep.skipped.append((label, "process or stack snapshot, not a log"))
+        elif ext in TEXT_EXT or ROTATED_RE.search(low):
             scan_text(rep, pkg, name, rules, label=label)
         else:
             rep.skipped.append((label, "not a log type"))
+
+
+def scan_gzip(rep: Report, data: bytes, label: str, rules):
+    raw = io.BufferedReader(gzip.GzipFile(fileobj=io.BytesIO(data)))
+    try:
+        raw.peek(1)
+        scan_text(rep, None, label, rules, label=label, raw=raw)
+    except (OSError, EOFError):
+        rep.skipped.append((label, "unreadable gzip file"))
 
 
 def _relabel(rep, name, label):
@@ -312,9 +339,25 @@ def summary(rep: Report):
                           "line_ranges": ranges([h[0] for h in hits]),
                           "first_timestamp": ts[0] if ts else None, "last_timestamp": ts[-1] if ts else None,
                           "samples": [{"line": h[0], "text": h[2]} for h in hits]})
-        cats.append({"category": cat, "severity": rep.severity.get(cat, ""), "total": total, "files": flist})
+        impact, description = rep.meta.get(cat, ("general", ""))
+        cats.append({"category": cat, "severity": rep.severity.get(cat, ""), "impact": impact_label(impact),
+                     "description": description, "total": total, "files": flist})
     cats.sort(key=lambda c: -c["total"])
     return cats
+
+
+def impacts(cats):
+    groups = {}
+    for c in cats:
+        g = groups.setdefault(c["impact"], {"impact": c["impact"], "severity": "", "total": 0, "categories": []})
+        g["total"] += c["total"]
+        g["categories"].append(c["category"])
+        if SEVERITY_RANK.get(c["severity"], 0) > SEVERITY_RANK.get(g["severity"], 0):
+            g["severity"] = c["severity"]
+    order = list(IMPACTS.values())
+    return sorted(groups.values(), key=lambda g: (-SEVERITY_RANK.get(g["severity"], 0),
+                                                  g["impact"] == IMPACTS["general"], -g["total"],
+                                                  order.index(g["impact"]) if g["impact"] in order else len(order)))
 
 
 def write_text(rep, cats, md=False):
@@ -322,14 +365,23 @@ def write_text(rep, cats, md=False):
     h = (lambda s: f"## {s}") if md else (lambda s: f"\n{s}\n" + "-" * len(s))
     o.append("# EPM support info error report" if md else "EPM support info error report")
     o.append(f"Source: {rep.source}\nPlatform: {rep.platform}\nFiles scanned: {len(rep.scanned)}\nFiles skipped: {len(rep.skipped)}")
-    o.append("Note: rules are starter patterns, to be tuned with real samples.")
+    o.append(h("Impact areas"))
+    if md:
+        o.append("| Impact area | Highest severity | Count | Categories |\n|---|---|---|---|")
+    for g in impacts(cats):
+        names = ", ".join(g["categories"])
+        o.append(f"| {g['impact']} | {g['severity']} | {g['total']} | {names} |" if md
+                 else f"{g['total']:>8}  {g['severity']:<7} {g['impact']}: {names}")
     o.append(h("Summary"))
     if md:
-        o.append("| Category | Severity | Count |\n|---|---|---|")
+        o.append("| Category | Severity | Impact area | Count |\n|---|---|---|---|")
     for c in cats:
-        o.append(f"| {c['category']} | {c['severity']} | {c['total']} |" if md else f"{c['total']:>8}  {c['severity']:<7} {c['category']}")
+        o.append(f"| {c['category']} | {c['severity']} | {c['impact']} | {c['total']} |" if md
+                 else f"{c['total']:>8}  {c['severity']:<7} {c['category']} [{c['impact']}]")
     for c in cats:
         o.append(h(f"{c['category']} ({c['total']})"))
+        if c["description"]:
+            o.append(c["description"])
         for f in c["files"]:
             r = f["line_ranges"]
             shown = ", ".join(r[:MAX_TEXT_LIST]) + (f" and {len(r) - MAX_TEXT_LIST} more" if len(r) > MAX_TEXT_LIST else "")
@@ -347,7 +399,7 @@ def write_text(rep, cats, md=False):
 def report_dict(rep, cats):
     return {"source": rep.source, "platform": rep.platform, "files_scanned": rep.scanned,
             "files_skipped": [{"path": p, "reason": r} for p, r in rep.skipped],
-            "notes": rep.notes, "categories": cats}
+            "notes": rep.notes, "impacts": impacts(cats), "categories": cats}
 
 
 def render(rep, cats, fmt):
@@ -356,11 +408,11 @@ def render(rep, cats, fmt):
     if fmt == "csv":
         s = io.StringIO()
         w = csv.writer(s)
-        w.writerow(["category", "severity", "path", "line", "text"])
+        w.writerow(["category", "severity", "path", "line", "text", "impact"])
         for c in cats:
             for f in c["files"]:
                 for smp in f["samples"]:
-                    w.writerow([c["category"], c["severity"], f["path"], smp["line"], smp["text"]])
+                    w.writerow([c["category"], c["severity"], f["path"], smp["line"], smp["text"], c["impact"]])
         return s.getvalue()
     return write_text(rep, cats, md=(fmt == "md"))
 
@@ -375,7 +427,7 @@ def run(path: str, platform: str = "auto") -> Tuple[Report, list]:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Count error instances in a decrypted EPM support info package.")
+    ap = argparse.ArgumentParser(description="Count errors and system-impacting conditions in a decrypted EPM support info package.")
     ap.add_argument("package", help="support info .zip, .tar, .tar.gz, or an extracted folder")
     ap.add_argument("--platform", choices=["auto", "windows", "macos", "linux"], default="auto")
     ap.add_argument("--output", "-o", help="report file (.txt, .md, .json, .csv); prints to screen if omitted")

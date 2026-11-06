@@ -1,6 +1,6 @@
 # EPM Support Analyzer
 
-Analyze a decrypted Windows, macOS, or Linux support-info archive. The web interface uses the same Python error rules and report format as the CLI.
+Analyze a decrypted Windows, macOS, or Linux support-info archive for errors and conditions that affect the endpoint, such as lost server connectivity, proxy and TLS failures, policy parse errors, agent service and driver problems, identity lookup timeouts, and sudo plugin failures. The web interface uses the same Python rules and report format as the CLI.
 
 ## Web interface
 
@@ -16,7 +16,7 @@ python python/server.py
 
 Open http://127.0.0.1:8765. The server binds only to `127.0.0.1`; use `--port` to choose a different port. Node.js is needed only to build or develop the interface.
 
-The Support Info tool accepts `.zip`, `.tar`, and `.tar.gz` archives up to 200 MB including form fields. Select automatic platform detection or an explicit platform, then analyze. Results include category counts and severity, file paths, line ranges, timestamps, matching sample lines, skipped-file reasons, and notes. Download JSON or CSV from the report. CSV downloads protect spreadsheet formula cells.
+The Support Info tool accepts `.zip`, `.tar`, and `.tar.gz` archives up to 200 MB including form fields. Select automatic platform detection or an explicit platform, then analyze. Results include impact areas, category counts and severity, file paths, line ranges, timestamps, matching sample lines, skipped-file reasons, and notes. Download JSON or CSV from the report. CSV downloads protect spreadsheet formula cells.
 
 Uploads are temporarily stored for analysis and deleted afterward. Reports are not automatically written to disk. The service accepts requests only from local hosts and local browser origins. It is a local tool, not an internet-facing server. Archive contents can require substantially more memory than the compressed upload; use trusted, decrypted support packages.
 

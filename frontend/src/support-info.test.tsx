@@ -9,8 +9,12 @@ const report = {
   files_scanned: ['ProgramData/Agent/Logs/agent.log'],
   files_skipped: [{ path: 'Procmon/capture.pml', reason: 'Export to CSV' }],
   notes: ['Line numbers refer to the scanned log.'],
+  impacts: [
+    { impact: 'Server connectivity', severity: 'high', total: 3, categories: ['MQTT communication errors', 'TLS/certificate errors'] },
+  ],
   categories: [{
-    category: 'MQTT communication errors', severity: 'high', total: 2,
+    category: 'MQTT communication errors', severity: 'high', impact: 'Server connectivity',
+    description: 'The agent cannot keep its server channel open.', total: 2,
     files: [{
       path: 'ProgramData/Agent/Logs/agent.log', count: 2, lines: [2, 3], line_ranges: ['2-3'],
       first_timestamp: '2026-01-01 09:00:01', last_timestamp: '2026-01-01 09:00:02',
@@ -67,6 +71,11 @@ describe('Support Info', () => {
     const categories = document.querySelectorAll('.category-summary')
     expect(categories[0].textContent).toContain('MQTT communication errors')
     expect(categories[1].textContent).toContain('TLS/certificate errors')
+    expect(categories[0].textContent).toContain('Server connectivity')
+    const impacts = screen.getByRole('list', { name: 'Impact areas' })
+    expect(impacts.textContent).toContain('Server connectivity')
+    expect(impacts.textContent).toContain('MQTT communication errors · TLS/certificate errors')
+    expect(screen.getByText('The agent cannot keep its server channel open.')).toBeTruthy()
     expect(screen.getByText('Lines: 2-3')).toBeTruthy()
     expect(screen.getByText('2026-01-01 09:00:01 → 2026-01-01 09:00:02')).toBeTruthy()
     expect(screen.getAllByText('ERROR MQTT connect refused')).toHaveLength(2)
@@ -116,6 +125,17 @@ describe('Support Info', () => {
     choose()
     submit()
     expect(await screen.findByText(/No matching errors found/)).toBeTruthy()
+  })
+
+  it('renders reports without impact data', async () => {
+    const older = { ...report, impacts: undefined, categories: [report.categories[1]] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => older }))
+    show()
+    choose()
+    submit()
+    await screen.findByRole('region', { name: 'Report results' })
+    expect(screen.queryByRole('list', { name: 'Impact areas' })).toBeNull()
+    expect(document.querySelector('.category-summary .tag')).toBeNull()
   })
 
   it('accepts a dropped compressed TAR archive', () => {

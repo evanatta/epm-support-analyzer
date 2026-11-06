@@ -1,6 +1,6 @@
 # Support info error report
 
-Counts error instances in a decrypted EPM support-info package for Windows, macOS, or Linux, with log paths and matching line numbers.
+Counts errors and conditions that affect the endpoint in a decrypted EPM support-info package for Windows, macOS, or Linux, with log paths and matching line numbers.
 
 ## Requirements
 
@@ -48,7 +48,13 @@ The interface has one tool: Support Info. Upload a decrypted `.zip`, `.tar`, or 
 - Inputs: `.zip`, `.tar`, `.tar.gz` or an extracted folder, including nested zips.
 - `.evtx` needs `python-evtx`; Procmon `.pml` must be exported to CSV in Procmon.
 - macOS `.logarchive` requires macOS and `log show`; Linux `.journal` requires `journalctl`.
-- Error patterns are in `rules.py`. Each rule specifies a name, severity, platforms, and regex.
+- Windows agent traces (`.trace`, `.trace.N`), Linux agent logs including rotated `epm.log.N.gz` and `*.log-YYYYMMDD` files, and macOS `epm_status.txt` and diagnostics text files are scanned as text.
+- Patterns are in `rules.py`, in three groups checked in order: status checks, EPM agent rules, and generic rules. Each rule has a name, severity, platforms, impact area, description, and regex. Status checks also set `files`, a regex that limits them to status files such as `initialInfo`, `epm_status.txt`, `systemextensionsctl_list.txt`, and `restart.txt`.
+- Each line is lowercased before matching, so write patterns in lower case. The first matching rule wins. Lines matching `BENIGN` (for example `AWS_ERROR_SUCCESS`) are ignored.
+
+## Impact areas
+
+Each category belongs to one impact area: server connectivity, policy delivery and enforcement, elevation and sudo, user and identity resolution, agent service health, driver and system extension, agent configuration and integrity, authentication and sign-in, host system, or general errors. Reports list impact areas first, with the highest severity and total matches for each. JSON adds `impacts` and per-category `impact` and `description`; CSV adds an `impact` column.
 
 ## Tests
 

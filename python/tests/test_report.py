@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 import epm_support_report as r
-from make_sample import build
+from make_sample import build, build_linux, build_macos, build_windows
 
 
 def files_for(cats, name):
@@ -85,6 +85,84 @@ class ReportTests(unittest.TestCase):
         data = ("x" * 65535 + "\r\n" + "y\r\nz").encode()
         lines = list(r.iter_lines(io.BufferedReader(io.BytesIO(data)), "utf-8"))
         self.assertEqual([n for n, _ in lines], [1, 2, 3])
+
+
+def lines_for(cats, name, path):
+    return files_for(cats, name).get(path, {}).get("lines")
+
+
+class EpmRuleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.win = r.run(build_windows(os.path.join(cls.tmp, "win.zip")))
+        cls.lnx = r.run(build_linux(os.path.join(cls.tmp, "lnx.zip")))
+        cls.mac = r.run(build_macos(os.path.join(cls.tmp, "mac.zip")))
+
+    def test_platforms(self):
+        self.assertEqual(self.win[0].platform, "windows")
+        self.assertEqual(self.lnx[0].platform, "linux")
+        self.assertEqual(self.mac[0].platform, "macos")
+
+    def test_windows_trace_rules(self):
+        cats = self.win[1]
+        log = "trace/vf_agent_srv.trace"
+        self.assertEqual(lines_for(cats, "EPM cloud client not connected", log), [2])
+        self.assertEqual(lines_for(cats, "EPM proxy connection failures", log), [3])
+        self.assertEqual(lines_for(cats, "Policy section terminator missing", log), [4])
+        self.assertEqual(lines_for(cats, "Policy load/parse failures", log), [5])
+        self.assertEqual(lines_for(cats, "Privilege management disabled", log), [6])
+        self.assertEqual(lines_for(cats, "Agent driver communication errors", log), [7])
+        self.assertEqual(lines_for(cats, "Agent IPC failures", "trace/vf_agent_srv.trace.1"), [1])
+        self.assertEqual(lines_for(cats, "Agent service restarts", "trace/restart.txt"), [1, 2])
+        self.assertEqual(files_for(cats, "EPM proxy connection failures")[log]["first_timestamp"], "2026.01.02 10:00:02")
+
+    def test_benign_lines_ignored(self):
+        hits = [l for c in self.win[1] for f in c["files"] if f["path"] == "trace/vf_agent_srv.trace" for l in f["lines"]]
+        self.assertNotIn(8, hits)
+        self.assertNotIn(1, hits)
+
+    def test_linux_rules(self):
+        rep, cats = self.lnx
+        root = "epm-supportinfo-fake/"
+        self.assertEqual(lines_for(cats, "Agent not running", root + "initialInfo"), [2])
+        self.assertEqual(lines_for(cats, "Agent not connected to EPM server", root + "initialInfo"), [3])
+        self.assertEqual(lines_for(cats, "User/group resolution timeouts", root + "epm.log"), [2])
+        self.assertEqual(lines_for(cats, "User/group not found", root + "epm.log"), [3])
+        self.assertEqual(lines_for(cats, "EPM manager address unreachable", root + "epm.log"), [4])
+        self.assertEqual(lines_for(cats, "EPM server request errors", root + "epm.log.1.gz"), [2])
+        self.assertEqual(lines_for(cats, "EPM sudo plugin failures", root + "sysSudo/epmsudo.log-20260101"), [1])
+        self.assertEqual(lines_for(cats, "Expired account passwords", root + "messages"), [1])
+        self.assertEqual(lines_for(cats, "PAM/NSS modules cannot reach the agent", root + "messages"), [2])
+        hits = [l for c in cats for f in c["files"] if f["path"] == root + "epm.log" for l in f["lines"]]
+        self.assertEqual(sorted(hits), [2, 3, 4])
+        self.assertIsNone(lines_for(cats, "Agent not running", root + "epm.log"))
+        self.assertIn(root + "epm.log.1.gz", rep.scanned)
+        self.assertIn(root + "epm.log.2.gz", dict(rep.skipped))
+
+    def test_macos_status_rules(self):
+        cats = self.mac[1]
+        root = "CyberArkEPMSupportInfo_fake/"
+        self.assertEqual(lines_for(cats, "macOS agent permissions missing", root + "epm_status.txt"), [2])
+        self.assertEqual(lines_for(cats, "Agent not connected to EPM server", root + "epm_status.txt"), [5])
+        self.assertEqual(lines_for(cats, "macOS system extension not active", root + "system_diagnostics/systemextensionsctl_list.txt"), [2])
+        self.assertEqual(lines_for(cats, "EPM socket timeouts and drops", root + "logs/logs_last_1d_only_epm_errors.log"), [1])
+        self.assertEqual(files_for(cats, "Policy enforcement suspended"), {})
+        self.assertIn(root + "system_diagnostics/spindump.txt", dict(self.mac[0].skipped))
+
+    def test_impacts(self):
+        cats = self.win[1]
+        cat = next(c for c in cats if c["category"] == "EPM proxy connection failures")
+        self.assertEqual(cat["impact"], "Server connectivity")
+        self.assertTrue(cat["description"])
+        groups = {g["impact"]: g for g in r.impacts(cats)}
+        self.assertEqual(groups["Server connectivity"]["severity"], "high")
+        self.assertEqual(groups["Policy delivery and enforcement"]["total"], 3)
+        self.assertEqual(r.impacts(cats)[0]["severity"], "high")
+        data = json.loads(r.render(self.win[0], cats, "json"))
+        self.assertEqual(data["impacts"], r.impacts(cats))
+        self.assertIn("Impact areas", r.render(self.win[0], cats, "txt"))
+        self.assertTrue(r.render(self.win[0], cats, "csv").startswith("category,severity,path,line,text,impact"))
 
 
 if __name__ == "__main__":
