@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from contextlib import closing
 from collections import defaultdict
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -29,6 +30,12 @@ class Package:
             self.zf = zipfile.ZipFile(path)
         elif self.kind == "tar":
             self.tf = tarfile.open(path)
+
+    def close(self):
+        if self.kind == "zip":
+            self.zf.close()
+        elif self.kind == "tar":
+            self.tf.close()
 
     def names(self) -> List[str]:
         if self.kind == "dir":
@@ -75,23 +82,23 @@ def detect_encoding(head: bytes) -> Optional[str]:
 
 
 def iter_lines(raw, enc: str) -> Iterator[Tuple[int, str]]:
-    text = io.TextIOWrapper(raw, encoding=enc, errors="replace", newline="")
-    n = 0
-    pending = ""
-    for chunk in iter(lambda: text.read(65536), ""):
-        pending += chunk
-        hold = pending.endswith("\r")
-        if hold:
-            pending = pending[:-1]
-        parts = re.split(r"\r\n|\n|\r", pending)
-        pending = parts.pop() + ("\r" if hold else "")
-        for p in parts:
+    with io.TextIOWrapper(raw, encoding=enc, errors="replace", newline="") as text:
+        n = 0
+        pending = ""
+        for chunk in iter(lambda: text.read(65536), ""):
+            pending += chunk
+            hold = pending.endswith("\r")
+            if hold:
+                pending = pending[:-1]
+            parts = re.split(r"\r\n|\n|\r", pending)
+            pending = parts.pop() + ("\r" if hold else "")
+            for p in parts:
+                n += 1
+                yield n, p
+        pending = pending.rstrip("\r")
+        if pending:
             n += 1
-            yield n, p
-    pending = pending.rstrip("\r")
-    if pending:
-        n += 1
-        yield n, pending
+            yield n, pending
 
 
 def detect_platform(names: List[str]) -> str:
@@ -126,12 +133,14 @@ def scan_text(rep: Report, pkg: Package, name: str, rules, label: Optional[str] 
     fh = raw or pkg.open(name)
     head = fh.peek(4096)[:4096] if hasattr(fh, "peek") else None
     if head is None:
-        data = fh.read()
+        with fh:
+            data = fh.read()
         fh = io.BufferedReader(io.BytesIO(data))
         head = data[:4096]
     enc = detect_encoding(head)
     if enc is None:
         rep.skipped.append((label, "binary"))
+        fh.close()
         return
     rep.scanned.append(label)
     for n, line in iter_lines(fh, enc):
@@ -139,6 +148,11 @@ def scan_text(rep: Report, pkg: Package, name: str, rules, label: Optional[str] 
             if r["regex"].search(line):
                 rep.add(r["name"], r["severity"], label, n, line)
                 break
+
+
+def is_procmon_csv(pkg: Package, name: str):
+    with pkg.open(name) as raw:
+        return b"Process Name" in raw.read(4096).replace(b"\x00", b"")
 
 
 def scan_procmon_csv(rep: Report, pkg: Package, name: str):
@@ -195,7 +209,9 @@ def scan_logarchive(rep: Report, pkg: Package, name: str, rules):
         else:
             for n in pkg.names():
                 if n.startswith(name) and not n.endswith("/"):
-                    dest = os.path.join(tmp, n)
+                    dest = os.path.realpath(os.path.join(tmp, n))
+                    if os.path.commonpath([os.path.realpath(tmp), dest]) != os.path.realpath(tmp):
+                        raise ValueError("Archive contains an unsafe path")
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     with open(dest, "wb") as f:
                         f.write(pkg.read(n))
@@ -243,7 +259,8 @@ def scan_package(pkg: Package, platform: str, rep: Report, prefix: str = "", dep
                 t.write(data)
             try:
                 if zipfile.is_zipfile(t.name) or tarfile.is_tarfile(t.name):
-                    scan_package(Package(t.name), platform, rep, label + "/", depth + 1)
+                    with closing(Package(t.name)) as nested:
+                        scan_package(nested, platform, rep, label + "/", depth + 1)
                 else:
                     rep.skipped.append((label, "unreadable archive"))
             finally:
@@ -254,7 +271,7 @@ def scan_package(pkg: Package, platform: str, rep: Report, prefix: str = "", dep
             rep.skipped.append((label, "Procmon PML is binary: open in Procmon and export to CSV, then re-run"))
         elif ext == ".journal":
             scan_journal(rep, pkg, name, rules)
-        elif ext == ".csv" and b"Process Name" in pkg.open(name).read(4096).replace(b"\x00", b""):
+        elif ext == ".csv" and is_procmon_csv(pkg, name):
             scan_procmon_csv(rep, pkg, name)
             _relabel(rep, name, label)
         elif ext in TEXT_EXT or re.search(r"\.log\.\d+$|\.\d+$", low):
@@ -327,11 +344,15 @@ def write_text(rep, cats, md=False):
     return "\n".join(o) + "\n"
 
 
+def report_dict(rep, cats):
+    return {"source": rep.source, "platform": rep.platform, "files_scanned": rep.scanned,
+            "files_skipped": [{"path": p, "reason": r} for p, r in rep.skipped],
+            "notes": rep.notes, "categories": cats}
+
+
 def render(rep, cats, fmt):
     if fmt == "json":
-        return json.dumps({"source": rep.source, "platform": rep.platform, "files_scanned": rep.scanned,
-                           "files_skipped": [{"path": p, "reason": r} for p, r in rep.skipped],
-                           "notes": rep.notes, "categories": cats}, indent=2)
+        return json.dumps(report_dict(rep, cats), indent=2)
     if fmt == "csv":
         s = io.StringIO()
         w = csv.writer(s)
@@ -346,11 +367,11 @@ def render(rep, cats, fmt):
 
 
 def run(path: str, platform: str = "auto") -> Tuple[Report, list]:
-    pkg = Package(path)
-    plat = detect_platform(pkg.names()) if platform == "auto" else platform
-    rep = Report(path, plat)
-    scan_package(pkg, plat, rep)
-    return rep, summary(rep)
+    with closing(Package(path)) as pkg:
+        plat = detect_platform(pkg.names()) if platform == "auto" else platform
+        rep = Report(path, plat)
+        scan_package(pkg, plat, rep)
+        return rep, summary(rep)
 
 
 def main(argv=None):
