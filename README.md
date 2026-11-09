@@ -2,6 +2,8 @@
 
 Analyze a decrypted Windows, macOS, or Linux support-info archive for errors and conditions that affect the endpoint, such as lost server connectivity, proxy and TLS failures, policy parse errors, agent service and driver problems, identity lookup timeouts, and sudo plugin failures. The web interface uses the same Python rules and report format as the CLI.
 
+> **Note:** This project is provided as-is. It is not supported by Palo Alto Networks nor an official Idira solution.
+
 ## Web interface
 
 Requirements: Python 3.9+ and Node.js 22.12+ (or 24 LTS). The Python server uses the standard library only. Run these commands from the repository root:
@@ -54,3 +56,9 @@ python -m unittest discover -s tests
 ```
 
 Tests use synthetic archives, including the local upload API. Frontend component tests: `npm test` from `frontend`. Type checking and packaging: `npm run build` from `frontend`.
+
+## Support
+
+This project is neither developed nor supported by Palo Alto Networks; any official support channels offered by the vendor are not appropriate for seeking help with the implementation or function of this project.
+
+Help should be sought by opening an issue in this repository.
